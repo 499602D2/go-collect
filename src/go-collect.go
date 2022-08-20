@@ -9,22 +9,25 @@ First version created on 2021.05.08
 package main
 
 import (
-	"os"
-	"io"
-	"fmt"
-	"log"
+	"archive/tar"
 	"bufio"
+	"compress/gzip"
+	"fmt"
+	"io"
+	"log"
+	"main/entities"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
-	"path/filepath"
-	"io/ioutil"
-	"archive/tar"
-	"compress/gzip"
+
 	"github.com/dustin/go-humanize"
-	"main/entities"
 )
 
-func search(config entities.Config, archivepath string) ([]string, int64) {
+func search(config entities.Config, archivepath string, allMatches *[]string, parseCount *int64, active_threads *int) {
+	// keep track of thread count
+	*active_threads++
+
 	// join paths, open file
 	file, err := os.Open(filepath.Join(config.CollectionPath, archivepath))
 	if err != nil {
@@ -54,7 +57,7 @@ func search(config entities.Config, archivepath string) ([]string, int64) {
 			fmt.Println("\t↳ end of archive")
 			break
 		}
-		
+
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -78,11 +81,11 @@ func search(config entities.Config, archivepath string) ([]string, int64) {
 
 			// check for a match
 			var splits []string
-			if strings.Contains(line, ":") == true {
+			if strings.Contains(line, ":") {
 				splits = strings.Split(line, ":")
-			} else if strings.Contains(line, ";") == true {
+			} else if strings.Contains(line, ";") {
 				splits = strings.Split(line, ";")
-			} else if strings.Contains(line, "|") == true {
+			} else if strings.Contains(line, "|") {
 				splits = strings.Split(line, "|")
 			} else {
 				splits = append(splits, line, line)
@@ -90,15 +93,15 @@ func search(config entities.Config, archivepath string) ([]string, int64) {
 
 			// check for a match
 			for _, target := range config.SearchKeywords {
-				if config.ExactMatch == true {
+				if config.ExactMatch {
 					if splits[0] == target {
 						fmt.Printf("\t↣ %s\n", line)
-						matches = append(matches, splits[0] + ":" + splits[1])
+						matches = append(matches, splits[0]+":"+splits[1])
 					}
 				} else {
-					if strings.Contains(splits[0], target) == true {
+					if strings.Contains(splits[0], target) {
 						fmt.Printf("\t↣ %s\n", line)
-						matches = append(matches, splits[0] + ":" + splits[1])
+						matches = append(matches, splits[0]+":"+splits[1])
 					}
 				}
 			}
@@ -115,10 +118,21 @@ func search(config entities.Config, archivepath string) ([]string, int64) {
 		}
 	}
 
-	// return all matches
-	return matches, parsed
-}
+	// extend allMatches to fit hits
+	temp := make([]string, len(*allMatches)+len(matches))
+	copy(temp, *allMatches)
+	copy(temp, matches)
 
+	// rename
+	*allMatches = temp
+
+	// stats
+	*parseCount += parsed
+
+	// threads
+	*active_threads--
+	fmt.Println("Done!")
+}
 
 func loadConfig(configfPath string) entities.Config {
 	// if config doesn't exist, create the file
@@ -130,7 +144,6 @@ func loadConfig(configfPath string) entities.Config {
 	return entities.LoadConfig(configfPath)
 }
 
-
 func main() {
 	const vnum = "2021.05.13"
 	fmt.Printf("Go-collect %s started at %s\n\n",
@@ -141,24 +154,45 @@ func main() {
 
 	// load config
 	config := loadConfig("config.json")
-	fmt.Println("config:", config)
+	fmt.Println("Config:", config)
 
 	// list all files in collection path
-	files, err := ioutil.ReadDir(config.CollectionPath)
+	absPath, err := filepath.Abs(config.CollectionPath)
 	if err != nil {
 		log.Fatal(err)
-		os.Exit(1)
+	}
+
+	files, err := os.ReadDir(absPath)
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	// save all matches in an array
 	allMatches := make([]string, 0)
 
 	// keep track of statistics
-	// humanize.Comma wants an int64, hence the type
 	var parseCount int64 = 0
+
+	// keep track of active thread count
+	active_threads := 0
+	worker_count := 4
+
+	fmt.Printf("Running with %d workers\n", worker_count)
 
 	// iterate over all files in target directory
 	for _, file := range files {
+		time.Sleep(time.Second)
+
+		if active_threads > worker_count-1 {
+			for {
+				if active_threads <= worker_count-1 {
+					break
+				} else {
+					time.Sleep(time.Second)
+				}
+			}
+		}
+
 		if file.Name()[0] != '.' {
 			// skip files we've already parsed
 			fileParsed := false
@@ -168,7 +202,7 @@ func main() {
 				}
 			}
 
-			if fileParsed == true {
+			if fileParsed {
 				fmt.Println("⃕ Skipping", file.Name())
 				continue
 			}
@@ -176,16 +210,7 @@ func main() {
 			fmt.Println("Opening archive:", file.Name())
 
 			// parse all files
-			hits, parsed := search(config, file.Name())
-			parseCount += parsed
-
-			// extend allMatches to fit hits
-			temp := make([]string, len(allMatches) + len(hits))
-			copy(temp, allMatches)
-			copy(temp, hits)
-
-			// rename
-			allMatches = temp
+			go search(config, file.Name(), &allMatches, &parseCount, &active_threads)
 		}
 	}
 
@@ -200,7 +225,7 @@ func main() {
 			}
 		}
 
-		if exists == false {
+		if !exists {
 			cleanedMatches = append(cleanedMatches, match)
 		}
 	}
@@ -212,7 +237,7 @@ func main() {
 	// print all hits
 	fmt.Printf(
 		"\n→ Search completed in %d seconds: found %d hit(s) out of %s\n",
-		tend - tstart,
+		tend-tstart,
 		len(cleanedMatches),
 		humanize.Comma(parseCount))
 
